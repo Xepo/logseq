@@ -9,6 +9,7 @@
             [frontend.handler.notification :as notification]
             [frontend.handler.draw :as draw]
             [frontend.handler.expand :as expand]
+            [frontend.format.mldoc :as mldoc]
             [frontend.format :as format]
             [frontend.format.block :as block]
             [frontend.image :as image]
@@ -145,7 +146,7 @@
    (when-let [node (gdom/getElement (str id))]
      (when-let [cursor-range (state/get-cursor-range)]
        (when-let [range (string/trim cursor-range)]
-         (let [pos (inc (diff/find-position markup range))]
+         (let [pos (diff/find-position markup range)]
            (util/set-caret-pos! node pos)))))))
 
 (defn block-content-join-newlines
@@ -384,9 +385,10 @@
    (save-block-if-changed! block value nil))
   ([{:block/keys [uuid content meta file page dummy? format repo pre-block? content ref-pages ref-blocks] :as block}
     value
-    {:keys [indent-left? custom-properties rebuild-content?]
+    {:keys [indent-left? custom-properties remove-property? rebuild-content?]
      :or {rebuild-content? true
-          custom-properties nil}}]
+          custom-properties nil
+          remove-property? false}}]
    (let [value value
          repo (or repo (state/get-current-repo))
          e (db/entity repo [:block/uuid uuid])
@@ -396,7 +398,7 @@
          page (db/entity repo (:db/id page))
          [old-properties new-properties] (when pre-block?
                                            [(:page/properties (db/entity (:db/id page)))
-                                            (db/parse-properties value format)])
+                                            (mldoc/parse-properties value format)])
          page-tags (when-let [tags (:tags new-properties)]
                      (util/->tags tags))
          page-alias (when-let [alias (:alias new-properties)]
@@ -414,7 +416,8 @@
                           (assoc new-properties :old_permalink (:permalink old-properties))
                           new-properties)
          value (cond
-                 (seq custom-properties)
+                 (or (seq custom-properties)
+                     remove-property?)
                  (text/re-construct-block-properties block value custom-properties)
 
                  (and (seq (:block/properties block))
@@ -456,10 +459,9 @@
                                       (or (:page/original-name page)
                                           (:page/name page)))
                                     (text/remove-level-spaces value (keyword format)))]
-                   (p/let [_ (fs/create-if-not-exists dir file-path content)]
-                     (db/reset-file! repo path content)
-                     (git-handler/git-add repo path)
-
+                   (p/let [_ (fs/create-if-not-exists repo dir file-path content)
+                           _ (git-handler/git-add repo path)]
+                     (file-handler/reset-file! repo path content)
                      (ui-handler/re-render-root!)
 
                      ;; Continue to edit the last block
@@ -514,6 +516,10 @@
                                           (map :tag/name page-tags))]
                            (concat pages tag-pages))
                          pages)
+                 pages (remove
+                        (fn [page]
+                          (string/blank? (:page/name page)))
+                        pages)
                  page-tags (when (and pre-block? (seq page-tags))
                              (if (seq page-tags)
                                [[:db/retract page-id :page/tags]
@@ -644,6 +650,11 @@
                                blocks-container-id (and blocks-container-id
                                                         (util/uuid-string? blocks-container-id)
                                                         (medley/uuid blocks-container-id))]
+
+                           ; WORKAROUND: The block won't refresh itself even if the content is empty.
+                           (when edit-self?
+                             (gobj/set input "value" ""))
+
                            (when ok-handler
                              (ok-handler
                               (if edit-self? (first blocks) (last blocks))))
@@ -695,13 +706,13 @@
             (let [content (util/default-content-with-title format (or
                                                                    (:page/original-name page)
                                                                    (:page/name page)))]
-              (p/let [_ (fs/create-if-not-exists dir file-path content)]
-                (db/reset-file! repo path
-                                (str content
-                                     (text/remove-level-spaces value (keyword format))
-                                     "\n"
-                                     snd-block-text))
-                (git-handler/git-add repo path)
+              (p/let [_ (fs/create-if-not-exists repo dir file-path content)
+                      _ (git-handler/git-add repo path)]
+                (file-handler/reset-file! repo path
+                                          (str content
+                                               (text/remove-level-spaces value (keyword format))
+                                               "\n"
+                                               snd-block-text))
                 (ui-handler/re-render-root!)
 
                 ;; Continue to edit the last block
@@ -959,11 +970,14 @@
 (defn delete-block!
   [state repo e]
   (let [{:keys [id block-id block-parent-id dummy? value pos format]} (get-state state)]
-    (when block-id
-      (when-let [page-id (:db/id (:block/page (db/entity [:block/uuid block-id])))]
-        (let [page-blocks-count (db/get-page-blocks-count repo page-id)
-              page (db/entity page-id)]
-          (when (> page-blocks-count 1)
+    (when (and block-id
+               (not= :block/delete (state/get-editor-op)))
+      (state/set-editor-op! :block/delete)
+      (let [page-id (:db/id (:block/page (db/entity [:block/uuid block-id])))
+            page-blocks-count (and page-id (db/get-page-blocks-count repo page-id))
+            page (and page-id (db/entity page-id))]
+        (if (> page-blocks-count 1)
+          (do
             (util/stop e)
             ;; delete block, edit previous block
             (let [block (db/pull [:block/uuid block-id])
@@ -983,7 +997,8 @@
                                0)]
                       (edit-block! block pos format id
                                    {:custom-content new-value
-                                    :tail-len tail-len}))))))))))))
+                                    :tail-len tail-len})))))))))
+      (state/set-editor-op! nil))))
 
 (defn delete-blocks!
   [repo block-uuids]
@@ -1035,7 +1050,8 @@
       (let [{:block/keys [content properties]} block]
         (when (get properties key)
           (save-block-if-changed! block content
-                                  {:custom-properties (dissoc properties key)}))))))
+                                  {:custom-properties (dissoc properties key)
+                                   :remove-property? true}))))))
 
 (defn set-block-property!
   [block-id key value]
@@ -1116,11 +1132,7 @@
     (doseq [block (state/get-selection-blocks)]
       (dom/remove-class! block "selected")
       (dom/remove-class! block "noselect"))
-    (state/clear-selection!))
-  ;; (when e
-  ;;   (when-not (util/input? (gobj/get e "target"))
-  ;;     (util/clear-selection!)))
-)
+    (state/clear-selection!)))
 
 (defn clear-selection-blocks!
   []
@@ -1130,6 +1142,12 @@
       (dom/remove-class! block "noselect"))
     (state/clear-selection-blocks!)))
 
+(defn exit-editing-and-set-selected-blocks!
+  [blocks]
+  (util/clear-selection!)
+  (state/clear-edit!)
+  (state/set-selection-blocks! blocks))
+
 (defn select-all-blocks!
   []
   (when-let [current-input-id (state/get-edit-input-id)]
@@ -1138,7 +1156,7 @@
           blocks (dom/by-class blocks-container "ls-block")]
       (doseq [block blocks]
         (dom/add-class! block "selected noselect"))
-      (state/set-selection-blocks! blocks))))
+      (exit-editing-and-set-selected-blocks! blocks))))
 
 (defn- get-selected-blocks-with-children
   []
@@ -1287,7 +1305,7 @@
     (let [blocks (util/get-nodes-between-two-nodes start-block end-block "ls-block")]
       (doseq [block blocks]
         (dom/add-class! block "selected noselect"))
-      (state/set-selection-blocks! blocks))))
+      (exit-editing-and-set-selected-blocks! blocks))))
 
 (defn on-select-block
   [state e up?]
@@ -1320,7 +1338,10 @@
 
               :else
               nil)
-            (state/conj-selection-block! element up?)))))))
+            (do
+              (util/clear-selection!)
+              (state/clear-edit!)
+              (state/conj-selection-block! element up?))))))))
 
 (defn save-block-aux!
   [block value format]
@@ -1341,19 +1362,33 @@
 (defn save-current-block-when-idle!
   []
   (when-let [repo (state/get-current-repo)]
-    (when (state/input-idle? repo)
-      (let [input-id (state/get-edit-input-id)
-            block (state/get-edit-block)
-            elem (and input-id (gdom/getElement input-id))
-            db-block (db/entity [:block/uuid (:block/uuid block)])
-            db-content (:block/content db-block)
-            db-content-without-heading (and db-content
-                                            (util/safe-subs db-content (:block/level db-block)))
-            value (and elem (gobj/get elem "value"))]
-        (when (and block value db-content-without-heading
-                   (not= (string/trim db-content-without-heading)
-                         (string/trim value)))
-          (save-block-aux! block value (:block/format block)))))))
+    (when (and (state/input-idle? repo)
+               (not (state/get-editor-show-page-search?))
+               (not (state/get-editor-show-page-search-hashtag?))
+               (not (state/get-editor-show-block-search?)))
+      (state/set-editor-op! :auto-save)
+      (try
+        (let [input-id (state/get-edit-input-id)
+              block (state/get-edit-block)
+              db-block (when-let [block-id (:block/uuid block)]
+                         (db/pull [:block/uuid block-id]))
+              elem (and input-id (gdom/getElement input-id))
+              db-content (:block/content db-block)
+              db-content-without-heading (and db-content
+                                              (util/safe-subs db-content (:block/level db-block)))
+              value (and elem (gobj/get elem "value"))]
+          (when (and block value db-content-without-heading
+                     (or
+                      (not= (string/trim db-content-without-heading)
+                            (string/trim value))))
+            (let [cur-pos (util/get-input-pos elem)]
+              (save-block-aux! db-block value (:block/format db-block))
+              ;; Restore the cursor after saving the block
+              (when (and elem cur-pos)
+                (util/set-caret-pos! elem cur-pos)))))
+        (catch js/Error error
+          (log/error :save-block-failed error)))
+      (state/set-editor-op! nil))))
 
 (defn on-up-down
   [state e up?]
@@ -1522,17 +1557,11 @@
         editing-page (and block
                           (when-let [page-id (:db/id (:block/page block))]
                             (:page/name (db/entity page-id))))]
-    (let [pages (db/get-pages (state/get-current-repo))
-          pages (if editing-page
-                  ;; To prevent self references
-                  (remove (fn [p] (= (string/lower-case p) editing-page)) pages)
-                  pages)]
-      (filter
-       (fn [page]
-         (string/index-of
-          (string/lower-case page)
-          (string/lower-case q)))
-       pages))))
+    (let [pages (search/page-search q 20)]
+      (if editing-page
+        ;; To prevent self references
+        (remove (fn [p] (= (string/lower-case p) editing-page)) pages)
+        pages))))
 
 (defn get-matched-blocks
   [q]
@@ -1542,7 +1571,7 @@
      (fn [h]
        (= (:block/uuid current-block)
           (:block/uuid h)))
-     (search/search q 21))))
+     (search/search q 10))))
 
 (defn get-matched-templates
   [q]
@@ -1772,7 +1801,8 @@
   (fn [state e]
     (when-let [repo (state/get-current-repo)]
       (let [blocks (seq (state/get-selection-blocks))]
-        (if (seq blocks)
+        (cond
+          (seq blocks)
           (let [ids (map (fn [block] (when-let [id (dom/attr block "blockid")]
                                        (medley/uuid id))) blocks)
                 ids (->> (mapcat #(let [children (vec (db/get-block-children-ids repo %))]
@@ -1827,6 +1857,11 @@
               {:key :block/change
                :data (map (fn [block] (assoc block :block/page page)) blocks)}
               [[file-path new-content]])))
+
+          (gdom/getElement "date-time-picker")
+          nil
+
+          :else
           (cycle-collapse! state e))))))
 
 (defn bulk-make-todos

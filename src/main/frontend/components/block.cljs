@@ -16,6 +16,7 @@
             [frontend.components.datetime :as datetime-comp]
             [frontend.ui :as ui]
             [frontend.handler.editor :as editor-handler]
+            [frontend.handler.block :as block-handler]
             [frontend.handler.dnd :as dnd]
             [frontend.handler.ui :as ui-handler]
             [frontend.handler.repeated :as repeated]
@@ -39,7 +40,9 @@
             [frontend.date :as date]
             [frontend.security :as security]
             [reitit.frontend.easy :as rfe]
-            [frontend.commands :as commands]))
+            [frontend.commands :as commands]
+            [lambdaisland.glogi :as log]
+            [frontend.context.i18n :as i18n]))
 
 (defn safe-read-string
   [s]
@@ -253,7 +256,7 @@
       [:a.page-ref
        {:href href
         :on-click (fn [e]
-                    (util/stop e)
+                    (.preventDefault e)
                     (when (gobj/get e "shiftKey")
                       (when-let [page-entity (db/entity [:page/name page])]
                         (state/sidebar-add-block!
@@ -286,9 +289,10 @@
        [:span.text-gray-500 "[["])
      (if (string/ends-with? s ".excalidraw")
        [:a.page-ref
-        {:href (rfe/href :draw nil {:file (string/replace s (str config/default-draw-directory "/") "")})
-         :on-click (fn [e]
-                     (util/stop e))}
+        {:on-click (fn [e]
+                     (util/stop e)
+                     (set! (.-href js/window.location)
+                           (rfe/href :draw nil {:file (string/replace s (str config/default-draw-directory "/") "")})))}
         [:span
          (svg/excalidraw-logo)
          (string/capitalize (draw/get-file-title s))]]
@@ -312,9 +316,8 @@
 (rum/defc block-embed < rum/reactive db-mixins/query
   [config id]
   (let [blocks (db/get-block-and-children (state/get-current-repo) id)]
-    [:div.embed-block.bg-base-2 {:style {:z-index 2}}
-     [:code "Embed block:"]
-     [:div.px-2
+    [:div.color-level.embed-block.bg-base-2 {:style {:z-index 2}}
+     [:div.px-3.pt-1.pb-2
       (blocks-container blocks (assoc config
                                       :embed? true
                                       :ref? false))]]))
@@ -324,9 +327,10 @@
   (let [page-name (string/lower-case page-name)
         page-original-name (:page/original-name (db/entity [:page/name page-name]))
         current-page (state/get-current-page)]
-    [:div.embed-page.py-2.my-2.px-3.bg-base-2
-     [:p
-      [:code.mr-2 "Embed page:"]
+    [:div.color-level.embed.embed-page.bg-base-2
+     {:class (if (:sidebar? config) "in-sidebar")}
+     [:section.flex.items-center.p-1.embed-header
+      [:div.mr-3 svg/page]
       (page-cp config {:page/name page-name})]
      (when (and
             (not= (string/lower-case (or current-page ""))
@@ -367,7 +371,7 @@
          [:span.text-gray-500 "(("]
          [:a {:href (rfe/href :page {:name id})
               :on-click (fn [e]
-                          (util/stop e)
+                          (.preventDefault e)
                           (when (gobj/get e "shiftKey")
                             (state/sidebar-add-block!
                              (state/get-current-repo)
@@ -419,7 +423,7 @@
     (if (and s (util/tag-valid? s))
       [:a.tag.mr-1 {:href (rfe/href :page {:name s})
                     :on-click (fn [e]
-                                (util/stop e)
+                                (.preventDefault e)
                                 (let [repo (state/get-current-repo)
                                       page (db/pull repo '[*] [:page/name (string/lower-case (util/url-decode s))])]
                                   (when (gobj/get e "shiftKey")
@@ -548,7 +552,7 @@
 
             :else
             (->elem
-             :a
+             :a.external-link
              (cond->
               {:href href
                :target "_blank"}
@@ -756,7 +760,7 @@
      [:a (if (not dummy?)
            {:href (rfe/href :page {:name uuid})
             :on-click (fn [e]
-                        (util/stop e)
+                        (.preventDefault e)
                         (when (gobj/get e "shiftKey")
                           (state/sidebar-add-block!
                            (state/get-current-repo)
@@ -840,8 +844,7 @@
 
 (defn list-checkbox
   [checked?]
-  (ui/checkbox {:style {:margin-right 6
-                        :margin-top -1}
+  (ui/checkbox {:style {:margin-right 6}
                 :checked checked?}))
 
 (defn marker-switch
@@ -943,8 +946,7 @@
           (when (and marker
                      (not (string/blank? marker))
                      (not= "nil" marker))
-            {:class (str (string/lower-case marker)
-                         "flex flex-row items-center")})
+            {:class (str (string/lower-case marker))})
           (when bg-color
             {:style {:background-color bg-color
                      :padding-left 6
@@ -994,16 +996,30 @@
 
 (defn- pre-block-cp
   [config content format]
-  (let [ast (mldoc/->edn content (mldoc/default-config format))
-        ast (map first ast)]
-    [:div.pre-block.bg-base-2.p-2
-     (markup-elements-cp (assoc config :block/format format) ast)]))
+  (rum/with-context [[t] i18n/*tongue-context*]
+    (let [ast (mldoc/->edn content (mldoc/default-config format))
+          ast (map first ast)
+          slide? (:slide? config)
+          only-title? (and (= 1 (count ast))
+                           (= "Properties" (ffirst ast))
+                           (let [m (second (first ast))]
+                             (= (keys m) [:title])))
+          block-cp [:div {:class (if only-title?
+                                   (util/hiccup->class "pre-block.opacity-50")
+                                   (util/hiccup->class "pre-block.bg-base-2.p-2.rounded"))}
+                    (if only-title?
+                      [:span (t :page/edit-properties-placeholder)]
+                      (markup-elements-cp (assoc config :block/format format) ast))]]
+      (if slide?
+        [:div [:h1 (:page-name config)]
+         block-cp]
+        block-cp))))
 
 (rum/defc properties-cp
   [block]
   (let [properties (apply dissoc (:block/properties block) text/hidden-properties)]
     (when (seq properties)
-      [:div.blocks__properties.text-sm.opacity-80.my-1.p-2
+      [:div.blocks-properties.text-sm.opacity-80.my-1.p-2
        (for [[k v] properties]
          [:div.my-1
           [:b k]
@@ -1091,9 +1107,7 @@
                           (editor-handler/unhighlight-block!))}]
     [:div.flex.relative
      [:div.flex-1.flex-col.relative.block-content
-      (cond-> {:id (str "block-content-" uuid)
-               :style {:cursor "text"
-                       :min-height 24}}
+      (cond-> {:id (str "block-content-" uuid)}
         (not slide?)
         (merge attrs))
 
@@ -1112,7 +1126,8 @@
 
       (when (and (seq properties)
                  (let [hidden? (text/properties-hidden? properties)]
-                   (not hidden?)))
+                   (not hidden?))
+                 (not (:slide? config)))
         (properties-cp block))
 
       (when (and (not pre-block?) (seq body))
@@ -1148,8 +1163,7 @@
          (when (and start-time finish-time (> finish-time start-time))
            [:div.text-sm.absolute.time-spent {:style {:top 0
                                                       :right 0
-                                                      :padding-left 2
-                                                      :z-index 4}
+                                                      :padding-left 2}
                                               :title (str (date/int->local-time start-time) " ~ " (date/int->local-time finish-time))}
             [:span.opacity-70
              (utils/timeConversion (- finish-time start-time))]])))]))
@@ -1537,7 +1551,13 @@
            title]
           (cond
             (and (seq result) view-f)
-            (let [result (sci/call-fn view-f result)]
+            (let [result (try
+                           (sci/call-fn view-f result)
+                           (catch js/Error error
+                             (log/error :custom-view-failed {:error error
+                                                             :result result})
+                             [:div "Custom view failed: "
+                              (str error)]))]
               (util/hiccup-keywordize result))
 
             (and (seq result)
@@ -1587,20 +1607,20 @@
        (let [format (:block/format config)]
          (for [[k v] m]
            (when (and (not (and (= k :macros) (empty? v))) ; empty macros
-                      (not (= k :title)))
+)
              [:div.property
-              [:span.font-medium.mr-1 (string/upper-case (str (name k) ": "))]
+              [:span.font-medium.mr-1 (str (name k) ": ")]
               (if (coll? v)
                 (for [item v]
                   (if (or (= k :tags)
                           (= k :alias))
                     (if (string/includes? item "[[")
                       (inline-text format item)
-                      (let [tag (-> item
-                                    (string/replace "[" "")
-                                    (string/replace "]" ""))]
-                        [:a.tag.mr-1 {:href (rfe/href :page {:name tag})}
-                         tag]))
+                      (let [p (-> item
+                                  (string/replace "[" "")
+                                  (string/replace "]" ""))]
+                        [:a.mr-1 {:href (rfe/href :page {:name p})}
+                         p]))
                     (inline-text format item)))
                 (inline-text format v))])))]
 
@@ -1608,7 +1628,7 @@
       ;; TODO: speedup
       (if (re-find #"\"Export_Snippet\" \"embed\"" (str l))
         (->elem :div (map-inline config l))
-        (->elem :p (map-inline config l)))
+        (->elem :div.is-paragraph (map-inline config l)))
 
       ["Horizontal_Rule"]
       (when-not (:slide? config)
@@ -1647,10 +1667,12 @@
 
           :else
           (let [language (if (contains? #{"edn" "clj" "cljc" "cljs" "clojure"} language) "text/x-clojure" language)]
-            [:div
-             (lazy-editor/editor config (str (dc/squuid)) attr code pos_meta)
-             (when (and (= language "text/x-clojure") (contains? (set options) ":results"))
-               (sci/eval-result code))])))
+            (if (:slide? config)
+              (highlight/highlight (str (medley/random-uuid)) {:data-lang language} code)
+              [:div
+               (lazy-editor/editor config (str (dc/squuid)) attr code pos_meta)
+               (when (and (= language "text/x-clojure") (contains? (set options) ":results"))
+                 (sci/eval-result code))]))))
       ["Quote" l]
       (->elem
        :blockquote
@@ -1786,7 +1808,7 @@
         sidebar? (:sidebar? config)
         ref? (:ref? config)
         custom-query? (:custom-query? config)
-        blocks->vec-tree #(if (or custom-query? ref?) % (db/blocks->vec-tree %))
+        blocks->vec-tree #(if (or custom-query? ref?) % (block-handler/blocks->vec-tree %))
         blocks (blocks->vec-tree blocks)]
     (when (seq blocks)
       [:div.blocks-container.flex-1
@@ -1794,14 +1816,14 @@
                                sidebar?
                                0
                                :else
-                               -18)}}
+                               -10)}}
        (let [first-block (first blocks)
-             blocks' (if (and (:block/pre-block? first-block)
-                              (db/pre-block-with-only-title? (:block/repo first-block) (:block/uuid first-block)))
-                       (rest blocks)
-                       blocks)
-             first-id (:block/uuid (first blocks'))]
-         (for [item blocks']
+             blocks (if (and (:block/pre-block? first-block)
+                             (block-handler/pre-block-with-only-title? (:block/repo first-block) (:block/uuid first-block)))
+                      (rest blocks)
+                      blocks)
+             first-id (:block/uuid (first blocks))]
+         (for [item blocks]
            (let [item (-> (if (:block/dummy? item)
                             item
                             (dissoc item :block/meta)))
@@ -1828,7 +1850,7 @@
         (let [page (db/entity (:db/id page))]
           [:div.my-2 (cond-> {:key (str "page-" (:db/id page))}
                        (:ref? config)
-                       (assoc :class "bg-base-2 px-7 py-2 rounded"))
+                       (assoc :class "color-level px-7 py-2 rounded"))
            (ui/foldable
             (page-cp config page)
             (blocks-container blocks config))]))]

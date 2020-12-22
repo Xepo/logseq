@@ -19,12 +19,17 @@
             [clojure.pprint :refer [pprint]]
             [goog.userAgent]))
 
+(goog-define NODETEST false)
+(defonce node-test? NODETEST)
+
 (extend-protocol IPrintWithWriter
   js/Symbol
   (-pr-writer [sym writer _]
     (-write writer (str "\"" (.toString sym) "\""))))
 
-;; envs
+;; doms
+(defn html-node []  js/document.documentElement)
+
 (defn ios?
   []
   (not (nil? (re-find #"iPad|iPhone|iPod" js/navigator.userAgent))))
@@ -261,7 +266,9 @@
 (defn get-caret-pos
   [input]
   (try
-    (bean/->clj ((gobj/get caret-pos "position") input))
+    (let [pos ((gobj/get caret-pos "position") input)]
+      (set! pos -rect (.. input (getBoundingClientRect) (toJSON)))
+      (bean/->clj pos))
     (catch js/Error e
       (js/console.error e))))
 
@@ -309,7 +316,7 @@
 (def moving-frequency 15)
 
 (defn cur-doc-top []
-  (+ (.. js/document -body -scrollTop) (.. js/document -documentElement -scrollTop)))
+  (.. js/document -documentElement -scrollTop))
 
 (defn element-top [elem top]
   (when elem
@@ -324,7 +331,7 @@
   (when-not (re-find #"^/\d+$" elem-id)
     (when elem-id
       (when-let [elem (gdom/getElement elem-id)]
-        (.scroll (gdom/getElement "main-content")
+        (.scroll (html-node)
                  #js {:top (let [top (element-top elem 0)]
                              (if (> top 68)
                                (- top 68)
@@ -332,11 +339,12 @@
                       :behavior "smooth"})))))
 
 (defn scroll-to
-  [pos]
-  (when-let [main-content (gdom/getElement "main-content")]
-    (.scroll main-content
-             #js {:top pos
-                  :behavior "smooth"})))
+  ([pos]
+   (scroll-to (html-node) pos))
+  ([node pos]
+   (.scroll node
+            #js {:top      pos
+                 :behavior "smooth"})))
 
 (defn scroll-to-top
   []
@@ -368,6 +376,11 @@
     (contains?
      #{"INPUT" "TEXTAREA"}
      (gobj/get node "tagName"))))
+
+(defn select?
+  [node]
+  (when node
+    (= "SELECT" (gobj/get node "tagName"))))
 
 (defn details-or-summary?
   [node]

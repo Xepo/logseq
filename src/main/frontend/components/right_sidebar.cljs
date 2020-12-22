@@ -8,6 +8,7 @@
             [frontend.components.onboarding :as onboarding]
             [frontend.handler.route :as route-handler]
             [frontend.handler.page :as page-handler]
+            [frontend.handler.graph :as graph-handler]
             [frontend.state :as state]
             [frontend.db :as db]
             [frontend.util :as util]
@@ -42,8 +43,8 @@
   (let [theme (:ui/theme @state/state)
         dark? (= theme "dark")
         graph (if (util/uuid-string? page)
-                (db/build-block-graph (uuid page) theme)
-                (db/build-page-graph page theme))]
+                (graph-handler/build-block-graph (uuid page) theme)
+                (graph-handler/build-page-graph page theme))]
     (when (seq (:nodes graph))
       [:div.sidebar-item.flex-col.flex-1
        (graph-2d/graph
@@ -151,7 +152,8 @@
           sections (block/build-slide-sections blocks {:id "slide-reveal-js"
                                                        :start-level 2
                                                        :slide? true
-                                                       :sidebar? true})]
+                                                       :sidebar? true
+                                                       :page-name page-name})]
       [[:a {:href (str "/page/" (util/url-encode page-name))}
         (util/capitalize-all page-name)]
        [:div.ml-2.slide.mt-2
@@ -179,7 +181,7 @@
           (build-sidebar-item repo idx db-id block-type block-data t))]
     (when item
       (let [collapse? (state/sub [:ui/sidebar-collapsed-blocks db-id])]
-        [:div.sidebar-item.content
+        [:div.sidebar-item.content.color-level
          (let [[title component] item]
            [:div.flex.flex-col
             [:div.flex.flex-row.justify-between
@@ -222,59 +224,37 @@
         repo (state/sub :git/current-repo)
         match (state/sub :route-match)
         theme (state/sub :ui/theme)
-        dark? (= "dark" theme)
         t (i18n/use-tongue)]
     (rum/with-context [[t] i18n/*tongue-context*]
-      [:div#right-sidebar.flex-col {:style {:height "100%"
-                                            :overflow "hidden"
-                                            :flex (if sidebar-open?
-                                                    "1 0 40%"
-                                                    "0 0 0px")}}
+      [:div#right-sidebar.cp__right-sidebar
+       {:class (if sidebar-open? "is-open")}
        (if sidebar-open?
-         [:div.hide-scrollbar {:style {:flex "1 1 auto"
-                        :padding 12
-                        :height "100%"
-                        :overflow-y "auto"
-                        :overflow-x "hidden"
-                        :box-sizing "content-box"}}
-          [:div.flex.flex-row.mb-2 {:key "right-sidebar-settings"}
-           [:div.mr-4.text-sm
-            [:a.right-sidebar-button {:on-click (fn [e]
+         [:div.cp__right-sidebar-inner
+          [:div.cp__right-sidebar-settings.hide-scrollbar {:key "right-sidebar-settings"}
+           [:div.ml-4.text-sm
+            [:a.cp__right-sidebar-settings-btn {:on-click (fn [e]
                                                   (state/sidebar-add-block! repo "contents" :contents nil))}
              (t :right-side-bar/contents)]]
 
-           [:div.mr-4.text-sm
-            [:a.right-sidebar-button {:on-click (fn [_e]
+           [:div.ml-4.text-sm
+            [:a.cp__right-sidebar-settings-btn {:on-click (fn [_e]
                                                   (state/sidebar-add-block! repo "recent" :recent nil))}
              (t :right-side-bar/recent)]]
 
            (when config/publishing?
-             [:div.mr-4.text-sm
+             [:div.ml-4.text-sm
               [:a {:href (rfe/href :all-pages)}
                (t :all-pages)]])
 
-           [:div.mr-4.text-sm
-            [:a.right-sidebar-button {:on-click (fn []
+           [:div.ml-4.text-sm
+            [:a.cp__right-sidebar-settings-btn {:on-click (fn []
                                                   (when-let [page (get-current-page)]
                                                     (state/sidebar-add-block!
                                                      repo
                                                      (str "page-graph-" page)
                                                      :page-graph
                                                      page)))}
-             (t :right-side-bar/page)]]
-
-           [:div.mr-4.text-sm
-            (let [theme (if dark? "white" "dark")]
-              [:a.right-sidebar-button {:title (t :right-side-bar/switch-theme theme)
-                                        :on-click (fn []
-                                                    (state/set-theme! theme))}
-               (t :right-side-bar/theme (t (keyword theme)))])]
-
-           (when-not config/publishing?
-             [:div.mr-4.text-sm
-              [:a.right-sidebar-button {:on-click (fn [_e]
-                                                    (state/sidebar-add-block! repo "help" :help nil))}
-               (t :right-side-bar/help)]])]
+             (t :right-side-bar/page)]]]
 
           (for [[idx [repo db-id block-type block-data]] (medley/indexed blocks)]
             (rum/with-key

@@ -42,8 +42,8 @@
            (when (nfs-handler/supported?)
              [:div.flex.flex-col
               [:div (ui/button
-                      (t :open-a-directory)
-                      :on-click nfs-handler/ls-dir-files)]
+                     (t :open-a-directory)
+                     :on-click nfs-handler/ls-dir-files)]
               [:span.warning.mt-2.text-sm "Warning: this is an experimental feature,"
                [:br]
                "please only use it for testing purpose."]])]
@@ -62,7 +62,8 @@
                                       "Clone again and re-index the db")
                              :on-click (fn []
                                          (if local?
-                                           (nfs-handler/refresh! url)
+                                           (nfs-handler/refresh! url
+                                                                 repo-handler/create-today-journal!)
                                            (repo-handler/rebuild-index! url))
                                          (js/setTimeout
                                           (fn []
@@ -92,8 +93,10 @@
           (let [syncing? (state/sub :graph/syncing?)]
             [:div.ml-2.mr-1.opacity-70.hover:opacity-100 {:class (if syncing? "loader" "initial")}
              [:a
-              {:on-click #(nfs-handler/refresh! repo)
-               :title (str "Sync files with the local directory: " (config/get-local-dir repo))}
+              {:on-click #(nfs-handler/refresh! repo
+                                                repo-handler/create-today-journal!)
+               :title (str "Sync files with the local directory: " (config/get-local-dir repo) ".\nVersion: "
+                           version/version)}
               svg/refresh]])
           (let [changed-files (state/sub [:repo/changed-files repo])
                 should-push? (seq changed-files)
@@ -104,9 +107,8 @@
                 last-pulled-at (db/sub-key-value repo :git/last-pulled-at)
                 ;; db-persisted? (state/sub [:db/persisted? repo])
                 editing? (seq (state/sub :editor/editing?))]
-            [:div.flex-row.flex.items-center
-             (when pushing?
-               [:span.lds-dual-ring.mt-1])
+            [:div.flex-row.flex.items-center.cp__repo-indicator
+             (when pushing? svg/loading)
              (ui/dropdown
               (fn [{:keys [toggle-fn]}]
                 [:div.cursor.w-2.h-2.sync-status.mr-2
@@ -137,7 +139,7 @@
                        [:p (t :git/push-failed)]
                        (and should-push? (seq changed-files))
                        [:div.changes
-                        [:ul.overflow-y-scroll {:style {:max-height 250}}
+                        [:ul.overflow-y-auto {:style {:max-height 250}}
                          (for [file changed-files]
                            [:li {:key (str "sync-" file)}
                             [:div.flex.flex-row.justify-between.align-items
@@ -153,8 +155,7 @@
                     [:div.flex.flex-row.justify-between.align-items.mt-2
                      (ui/button (t :git/push)
                                 :on-click (fn [] (state/set-modal! commit/add-commit-message)))
-                     (if pushing?
-                       [:span.lds-dual-ring.mt-1])]]
+                     (if pushing? svg/loading)]]
                    [:hr]
                    [:div
                     (when-not (string/blank? last-pulled-at)
@@ -163,8 +164,7 @@
                     [:div.flex.flex-row.justify-between.align-items
                      (ui/button (t :git/pull)
                                 :on-click (fn [] (repo-handler/pull-current-repo)))
-                     (if pulling?
-                       [:span.lds-dual-ring.mt-1])]
+                     (if pulling? svg/loading)]
                     [:a.mt-5.text-sm.opacity-50.block
                      {:on-click (fn []
                                   (export-handler/export-repo-as-zip! repo))}
@@ -182,7 +182,7 @@
                             (config/get-local-dir repo)
                             (if head?
                               (db/get-repo-path repo)
-                              (util/take-at-most (db/get-repo-name repo) 20))))]
+                              (util/take-at-most (repo-handler/get-repo-name repo) 20))))]
       (let [repos (->> (state/sub [:me :repos])
                        (remove (fn [r] (= config/local-repo (:url r)))))]
         (cond

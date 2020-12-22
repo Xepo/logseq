@@ -1,5 +1,5 @@
 (ns frontend.db-mixins
-  (:require [frontend.db :as db]))
+  (:require [frontend.db.react :as db]))
 
 (def query
   {:wrap-render

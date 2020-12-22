@@ -6,6 +6,7 @@
             [frontend.handler.ui :as ui-handler]
             [frontend.handler.common :as common-handler]
             [frontend.handler.route :as route-handler]
+            [frontend.handler.graph :as graph-handler]
             [frontend.handler.notification :as notification]
             [frontend.handler.editor :as editor-handler]
             [frontend.state :as state]
@@ -34,7 +35,8 @@
             [cljs-time.core :as t]
             [cljs.pprint :as pprint]
             [frontend.context.i18n :as i18n]
-            [reitit.frontend.easy :as rfe]))
+            [reitit.frontend.easy :as rfe]
+            [frontend.handler.block :as block-handler]))
 
 (defn- get-page-name
   [state]
@@ -47,14 +49,14 @@
     (if block?
       (db/get-block-and-children repo block-id)
       (do
-        (db/add-page-to-recent! repo page-original-name)
+        (page-handler/add-page-to-recent! repo page-original-name)
         (db/get-page-blocks repo page-name)))))
 
 (rum/defc page-blocks-cp < rum/reactive
   db-mixins/query
   [repo page file-path page-name page-original-name encoded-page-name sidebar? journal? block? block-id format]
   (let [raw-page-blocks (get-blocks repo page-name page-original-name block? block-id)
-        page-blocks (db/with-dummy-block raw-page-blocks format
+        page-blocks (block-handler/with-dummy-block raw-page-blocks format
                       (if (empty? raw-page-blocks)
                         (let [content (db/get-file repo file-path)]
                           {:block/page {:db/id (:db/id page)}
@@ -130,9 +132,9 @@
         {:stroke "currentColor", :view-box "0 0 24 24", :fill "none"}
         [:path
          {:d
-          "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z",
-          :stroke-width "2",
-          :stroke-linejoin "round",
+          "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+          :stroke-width "2"
+          :stroke-linejoin "round"
           :stroke-linecap "round"}]]]
       [:div.mt-3.text-center.sm:mt-0.sm:ml-4.sm:text-left
        [:h3#modal-headline.text-lg.leading-6.font-medium.text-gray-900
@@ -283,20 +285,32 @@
                              :options {:on-click #(state/set-modal! (rename-page-dialog page-name))}}
                             {:title (t :page/delete)
                              :options {:on-click #(state/set-modal! (delete-page-dialog page-name))}}
-                            {:title (t (if public? :page/make-private :page/make-public))
-                             :options {:on-click #(page-handler/update-public-attribute!
-                                                   page-name
-                                                   (if public? false true))}}
-                            {:title (t :page/publish)
-                             :options {:on-click (fn []
-                                                   (page-handler/publish-page! page-name project/add-project))}}
-                            {:title (t :page/publish-as-slide)
-                             :options {:on-click (fn []
-                                                   (page-handler/publish-page-as-slide! page-name project/add-project))}}
-                            (when published?
-                              {:title (t :page/unpublish)
-                               :options {:on-click (fn []
-                                                     (page-handler/unpublish-page! page-name))}})
+                            {:title   (t :page/action-publish)
+                             :options {:on-click
+                                       (fn []
+                                         (state/set-modal!
+                                          (fn []
+                                            [:div.cp__page-publish-actions
+                                             (mapv (fn [{:keys [title options]}]
+                                                     (when title
+                                                       [:div.it
+                                                        {:on-click #(state/close-modal!)}
+                                                        (apply (partial ui/button title) (flatten (seq options)))]))
+                                                   [{:title   (t :page/publish)
+                                                     :options {:on-click (fn []
+                                                                           (page-handler/publish-page! page-name project/add-project))}}
+                                                    {:title   (t :page/publish-as-slide)
+                                                     :options {:on-click (fn []
+                                                                           (page-handler/publish-page-as-slide! page-name project/add-project))}}
+                                                    (when published?
+                                                      {:title   (t :page/unpublish)
+                                                       :options {:on-click (fn []
+                                                                             (page-handler/unpublish-page! page-name))}})
+                                                    {:title   (t (if public? :page/make-private :page/make-public))
+                                                     :options {:background (if public? "gray" "indigo")
+                                                               :on-click #(page-handler/update-public-attribute!
+                                                                           page-name
+                                                                           (if public? false true))}}])])))}}
                             (when developer-mode?
                               {:title "(Dev) Show page data"
                                :options {:on-click (fn []
@@ -328,7 +342,7 @@
             (when (and (not sidebar?)
                        (not block?))
               [:a {:on-click (fn [e]
-                               (util/stop e)
+                               (.preventDefault e)
                                (when (gobj/get e "shiftKey")
                                  (when-let [page (db/pull repo '[*] [:page/name page-name])]
                                    (state/sidebar-add-block!
@@ -404,7 +418,7 @@
         sidebar-open? (state/sub :ui/sidebar-open?)
         [width height] (rum/react layout)
         dark? (= theme "dark")
-        graph (db/build-global-graph theme (rum/react show-journal?))
+        graph (graph-handler/build-global-graph theme (rum/react show-journal?))
         dot-mode-value? (rum/react dot-mode?)]
     (rum/with-context [[t] i18n/*tongue-context*]
       [:div.relative#global-graph
@@ -422,7 +436,7 @@
             :ref-atom graph-ref}))
          [:div.ls-center.mt-20
           [:p.opacity-70.font-medium "Empty"]])
-       [:div.absolute.top-5.left-5
+       [:div.absolute.top-15.left-5
         [:div.flex.flex-col
          [:a.text-sm.font-medium
           {:on-click (fn [_e]
@@ -449,7 +463,7 @@
       [:div.flex-1
        [:h1.title (t :all-pages)]
        (when current-repo
-         (let [pages (db/get-pages-with-modified-at current-repo)]
+         (let [pages (page-handler/get-pages-with-modified-at current-repo)]
            [:table.table-auto
             [:thead
              [:tr
@@ -460,7 +474,7 @@
                (let [encoded-page (util/encode-str page)]
                  [:tr {:key encoded-page}
                   [:td [:a {:on-click (fn [e]
-                                        (util/stop e)
+                                        (.preventDefault e)
                                         (let [repo (state/get-current-repo)
                                               page (db/pull repo '[*] [:page/name (string/lower-case page)])]
                                           (when (gobj/get e "shiftKey")

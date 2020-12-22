@@ -2,6 +2,7 @@
   "The File System Access API, https://web.dev/file-system-access/."
   (:require [cljs-bean.core :as bean]
             [promesa.core :as p]
+            [medley.core :as medley]
             [goog.object :as gobj]
             [goog.dom :as gdom]
             [frontend.util :as util]
@@ -27,6 +28,7 @@
                                   %) files)]
       (if-let [file (:file/file ignore-file)]
         (p/let [content (.text file)]
+
           (when content
             (let [paths (set (file-handler/ignore-files content (map :file/path files)))]
               (when (seq paths)
@@ -57,16 +59,38 @@
                        (keyword (util/get-file-ext (:file/path file)))))
           files))
 
+(defn- set-batch!
+  [handles]
+  (let [handles (map (fn [[path handle]]
+                       {:key path
+                        :value handle}) handles)]
+    (idb/set-batch! handles)))
+
+(defn- set-files-aux!
+  [handles]
+  (if (seq handles)
+    (let [[h t] (split-at 50 handles)]
+      (p/let [_ (p/promise (fn [_]
+                             (js/setTimeout (fn []
+                                              (p/resolved nil)) 10)))
+              _ (set-batch! h)]
+        (when (seq t)
+          (set-files-aux! t))))))
+
 (defn- set-files!
   [handles]
-  (doseq [[path handle] handles]
-    (let [handle-path (str config/local-handle-prefix path)]
-      (idb/set-item! handle-path handle)
-      (fs/add-nfs-file-handle! handle-path handle))))
+  (let [handles (map (fn [[path handle]]
+                       (let [handle-path (str config/local-handle-prefix path)]
+                         [handle-path handle]))
+                     handles)]
+    (doseq [[path handle] handles]
+      (fs/add-nfs-file-handle! path handle))
+    (set-files-aux! handles)))
 
 (defn ls-dir-files
   []
   (let [path-handles (atom {})]
+    ;; TODO: add ext filter to avoid loading .git or other ignored file handlers
     (->
      (p/let [result (utils/openDirectory #js {:recursive true}
                                          (fn [path handle]
@@ -85,8 +109,15 @@
                  (swap! path-handles (fn [handles]
                                        (->> handles
                                             (filter (fn [[path _handle]]
-                                                      (contains? file-paths
-                                                                 (string/replace-first path (str dir-name "/") ""))))
+                                                      (or
+                                                       (contains? file-paths
+                                                                  (string/replace-first path (str dir-name "/") ""))
+                                                       (let [last-part (last (string/split path "/"))]
+                                                         (contains? #{config/app-name
+                                                                      config/default-draw-directory
+                                                                      config/default-journals-directory
+                                                                      config/default-pages-directory}
+                                                                    last-part)))))
                                             (into {})))))
              _ (set-files! @path-handles)
              markup-files (filter-markup-and-built-in-files files)]
@@ -167,68 +198,78 @@
           handle-path (str config/local-handle-prefix dir-name)
           path-handles (atom {})]
       (state/set-graph-syncing? true)
-      (p/let [handle (idb/get-item handle-path)
-              _ (when handle (utils/verifyPermission handle true))
-              files-result (utils/getFiles handle true
-                                           (fn [path handle]
-                                             (swap! path-handles assoc path handle)))
-              new-files (-> (->db-files dir-name files-result)
-                            remove-ignore-files)
-              _ (let [file-paths (set (map :file/path new-files))]
-                  (swap! path-handles (fn [handles]
-                                        (->> handles
-                                             (filter (fn [[path _handle]]
-                                                       (contains? file-paths
-                                                                  (string/replace-first path (str dir-name "/") ""))))
-                                             (into {})))))
-              _ (set-files! @path-handles)
-              get-file-f (fn [path files] (some #(when (= (:file/path %) path) %) files))
-              {:keys [added modified deleted] :as diffs} (compute-diffs old-files new-files)
-              ;; Use the same labels as isomorphic-git
-              rename-f (fn [typ col] (mapv (fn [file] {:type typ :path file}) col))
-              _ (when (seq deleted)
-                  (p/all (map (fn [path]
-                                (let [handle-path (str handle-path path)]
-                                  (idb/remove-item! handle-path)
-                                  (fs/remove-nfs-file-handle! handle-path))) deleted)))
-              added-or-modified (set (concat added modified))
-              _ (when (seq added-or-modified)
-                  (p/all (map (fn [path]
-                                (when-let [handle (get @path-handles path)]
-                                  (idb/set-item! (str handle-path path) handle))) added-or-modified)))]
-        (-> (p/all (map (fn [path]
-                          (when-let [file (get-file-f path new-files)]
-                            (p/let [content (.text (:file/file file))]
-                              (assoc file :file/content content)))) added-or-modified))
-            (p/then (fn [result]
-                      (let [files (map #(dissoc % :file/file :file/handle) result)
-                            non-modified? (fn [file]
-                                            (let [content (:file/content file)
-                                                  old-content (:file/content (get-file-f (:file/path file) old-files))]
-                                              (= content old-content)))
-                            non-modified-files (->> (filter non-modified? files)
-                                                    (map :file/path))
-                            modified-files (remove non-modified? files)
-                            modified (set/difference (set modified) (set non-modified-files))
-                            diffs (concat
-                                   (rename-f "remove" deleted)
-                                   (rename-f "add" added)
-                                   (rename-f "modify" modified))]
-                        (when (or (and (seq diffs) (seq modified-files))
-                                  (seq diffs) ; delete
+      (->
+       (p/let [handle (idb/get-item handle-path)]
+         (when handle
+           (p/let [_ (when handle (utils/verifyPermission handle true))
+                   files-result (utils/getFiles handle true
+                                                (fn [path handle]
+                                                  (swap! path-handles assoc path handle)))
+                   new-files (-> (->db-files dir-name files-result)
+                                 remove-ignore-files)
+                   _ (let [file-paths (set (map :file/path new-files))]
+                       (swap! path-handles (fn [handles]
+                                             (->> handles
+                                                  (filter (fn [[path _handle]]
+                                                            (contains? file-paths
+                                                                       (string/replace-first path (str dir-name "/") ""))))
+                                                  (into {})))))
+                   _ (set-files! @path-handles)
+                   get-file-f (fn [path files] (some #(when (= (:file/path %) path) %) files))
+                   {:keys [added modified deleted] :as diffs} (compute-diffs old-files new-files)
+                  ;; Use the same labels as isomorphic-git
+                   rename-f (fn [typ col] (mapv (fn [file] {:type typ :path file}) col))
+                   _ (when (seq deleted)
+                       (let [deleted (doall
+                                      (-> (map (fn [path] (if (= "/" (first path))
+                                                            path
+                                                            (str "/" path))) deleted)
+                                          (distinct)))]
+                         (p/all (map (fn [path]
+                                       (let [handle-path (str handle-path path)]
+                                         (idb/remove-item! handle-path)
+                                         (fs/remove-nfs-file-handle! handle-path))) deleted))))
+                   added-or-modified (set (concat added modified))
+                   _ (when (seq added-or-modified)
+                       (p/all (map (fn [path]
+                                     (when-let [handle (get @path-handles path)]
+                                       (idb/set-item! (str handle-path path) handle))) added-or-modified)))]
+             (-> (p/all (map (fn [path]
+                               (when-let [file (get-file-f path new-files)]
+                                 (p/let [content (.text (:file/file file))]
+                                   (assoc file :file/content content)))) added-or-modified))
+                 (p/then (fn [result]
+                           (let [files (map #(dissoc % :file/file :file/handle) result)
+                                 non-modified? (fn [file]
+                                                 (let [content (:file/content file)
+                                                       old-content (:file/content (get-file-f (:file/path file) old-files))]
+                                                   (= content old-content)))
+                                 non-modified-files (->> (filter non-modified? files)
+                                                         (map :file/path))
+                                 modified-files (remove non-modified? files)
+                                 modified (set/difference (set modified) (set non-modified-files))
+                                 diffs (concat
+                                        (rename-f "remove" deleted)
+                                        (rename-f "add" added)
+                                        (rename-f "modify" modified))]
+                             (when (or (and (seq diffs) (seq modified-files))
+                                       (seq diffs) ; delete
 )
-                          (repo-handler/load-repo-to-db! repo
-                                                         {:diffs diffs
-                                                          :nfs-files modified-files})))))
-            (p/catch (fn [error]
-                       (log/error :nfs/load-files-error error)))
-            (p/finally (fn [_]
-                         (state/set-graph-syncing? false))))))))
+                               (repo-handler/load-repo-to-db! repo
+                                                              {:diffs diffs
+                                                               :nfs-files modified-files})))))))))
+       (p/catch (fn [error]
+                  (log/error :nfs/load-files-error error)))
+       (p/finally (fn [_]
+                    (state/set-graph-syncing? false)))))))
 
-(defn- refresh!
-  [repo]
+(defn refresh!
+  [repo ok-handler]
   (when repo
-    (reload-dir! repo)))
+    (state/set-nfs-refreshing! true)
+    (p/let [_ (reload-dir! repo)
+            _ (ok-handler)]
+      (state/set-nfs-refreshing! false))))
 
 (defn supported?
   []

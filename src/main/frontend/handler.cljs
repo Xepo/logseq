@@ -9,6 +9,8 @@
             [promesa.core :as p]
             [cljs-bean.core :as bean]
             [frontend.date :as date]
+            [frontend.search :as search]
+            [frontend.search.db :as search-db]
             [frontend.handler.notification :as notification]
             [frontend.handler.page :as page-handler]
             [frontend.handler.repo :as repo-handler]
@@ -25,15 +27,15 @@
 
 (defn- watch-for-date!
   []
-  (js/setInterval (fn []
-                    (state/set-today! (date/today))
-                    (when-let [repo (state/get-current-repo)]
-                      (when (or (db/cloned? repo)
-                                (config/local-db? repo))
-                        (let [today-page (string/lower-case (date/today))]
-                          (when (empty? (db/get-page-blocks-no-cache repo today-page))
-                            (repo-handler/create-today-journal-if-not-exists repo))))))
-                  1000))
+  (let [f (fn []
+            (when-not (state/nfs-refreshing?)
+              (repo-handler/create-today-journal!))
+            (when-let [repo (state/get-current-repo)]
+              (when (and (search-db/empty? repo)
+                         (state/input-idle? repo))
+                (search/rebuild-indices!))))]
+    (f)
+    (js/setInterval f 5000)))
 
 (defn store-schema!
   []
@@ -163,5 +165,7 @@
                       :example? true}])]
         (state/set-repos! repos)
         (restore-and-setup! me repos logged?)))
+    (reset! db/*sync-search-indice-f search/sync-search-indice!)
     (db/run-batch-txs!)
+    (file-handler/run-writes-chan!)
     (editor-handler/periodically-save!)))

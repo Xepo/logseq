@@ -5,7 +5,9 @@
             [frontend.handler.editor :as editor-handler :refer [get-state]]
             [frontend.util :as util :refer-macros [profile]]
             [frontend.handler.file :as file]
+            [frontend.handler.block :as block-handler]
             [frontend.handler.page :as page-handler]
+            [frontend.handler.editor.keyboards :as keyboards-handler]
             [frontend.components.datetime :as datetime-comp]
             [promesa.core :as p]
             [frontend.state :as state]
@@ -194,7 +196,7 @@
                                        template-parent-level (:block/level block)
                                        pattern (config/get-block-pattern format)
                                        content
-                                       (db/get-block-full-content
+                                       (block-handler/get-block-full-content
                                         (state/get-current-repo)
                                         (:block/uuid block)
                                         (fn [{:block/keys [level content properties] :as block}]
@@ -309,18 +311,33 @@
               (on-submit command @input-value pos)))])))))
 
 (rum/defc absolute-modal < rum/static
-  [cp set-default-width? {:keys [top left]}]
-  [:div.absolute.rounded-md.shadow-lg.absolute-modal
-   {:style (merge
-            {:top (+ top 24)
-             :max-height 600
-             :z-index 11}
-            (if set-default-width?
-              {:width 400})
-            (if config/mobile?
-              {:left 0}
-              {:left left}))}
-   cp])
+  [cp set-default-width? {:keys [top left rect]}]
+  (let [max-height 500
+        max-width 300
+        offset-top 24
+        vw-height js/window.innerHeight
+        vw-width js/window.innerWidth
+        to-max-height (if (and (seq rect) (> vw-height max-height))
+                        (let [delta-height (- vw-height (+ (:top rect) top offset-top))]
+                          (if (< delta-height max-height)
+                            (- (max (* 2 offset-top) delta-height) 16)
+                            max-height))
+                        max-height)
+        x-overflow? (if (and (seq rect) (> vw-width max-width))
+                      (let [delta-width (- vw-width (+ (:left rect) left))]
+                        (< delta-width (* max-width 0.5))))] ;; FIXME: for translateY layer
+    [:div.absolute.rounded-md.shadow-lg.absolute-modal
+     {:class (if x-overflow? "is-overflow-vw-x" "")
+      :style (merge
+              {:top        (+ top offset-top)
+               :max-height to-max-height
+               :z-index    11}
+              (if set-default-width?
+                {:width max-width})
+              (if config/mobile?
+                {:left 0}
+                {:left left}))}
+     cp]))
 
 (rum/defc transition-cp < rum/reactive
   [cp set-default-width? pos]
@@ -345,10 +362,9 @@
    (when-let [uploading? (util/react editor-handler/*image-uploading?)]
      (let [processing (util/react editor-handler/*image-uploading-process)]
        (transition-cp
-        [:div.flex.flex-row.align-center.rounded-md.shadow-sm.bg-base-2.pl-1.pr-1
-         [:span.lds-dual-ring.mr-2]
-         [:span {:style {:margin-top 2}}
-          (util/format "Uploading %s%" (util/format "%2d" processing))]]
+        [:div.flex.flex-row.align-center.rounded-md.shadow-sm.bg-base-2.px-1.py-1
+         (ui/loading
+          (util/format "Uploading %s%" (util/format "%2d" processing)))]
         false
         *slash-caret-pos)))])
 
@@ -492,8 +508,13 @@
          (fn [e key-code]
            (let [key (gobj/get e "key")
                  value (gobj/get input "value")
-                 pos (:pos (util/get-caret-pos input))]
+                 ctrlKey (gobj/get e "ctrlKey")
+                 metaKey (gobj/get e "metaKey")
+                 pos (util/get-input-pos input)]
              (cond
+               (or ctrlKey metaKey)
+               nil
+
                (or
                 (and (= key "#")
                      (and
@@ -607,12 +628,17 @@
               (editor-handler/close-autocomplete-if-outside input))))))))
   {:did-mount (fn [state]
                 (let [[{:keys [dummy? format block-parent-id]} id] (:rum/args state)
-                      content (get-in @state/state [:editor/content id])]
+                      content (get-in @state/state [:editor/content id])
+                      input (gdom/getElement id)]
                   (when block-parent-id
                     (state/set-editing-block-dom-id! block-parent-id))
-                  (editor-handler/restore-cursor-pos! id content dummy?)
+                  (if (= :indent-outdent (state/get-editor-op))
+                    (when input
+                      (when-let [pos (state/get-edit-pos)]
+                        (util/set-caret-pos! input pos)))
+                    (editor-handler/restore-cursor-pos! id content dummy?))
 
-                  (when-let [input (gdom/getElement id)]
+                  (when input
                     (dnd/subscribe!
                      input
                      :upload-images
@@ -621,32 +647,14 @@
 
                   ;; Here we delay this listener, otherwise the click to edit event will trigger a outside click event,
                   ;; which will hide the editor so no way for editing.
-                  (js/setTimeout
-                   (fn []
-                     (mixins/hide-when-esc-or-outside
-                      state
-                      :on-hide
-                      (fn [state e event]
-                        (let [target (.-target e)]
-                          (if (d/has-class? target "bottom-action") ;; FIXME: not particular case
-                            (.preventDefault e)
-                            (let [{:keys [on-hide format value block id repo dummy?]} (get-state state)]
-                              (when on-hide
-                                (on-hide value event))
-                              (when
-                               (or (= event :esc)
-                                   (= event :visibilitychange)
-                                   (and (= event :click)
-                                        (not (editor-handler/in-auto-complete? (gdom/getElement id)))))
-                                (state/clear-edit!))))))
-                      :node (gdom/getElement id)
-                      ;; :visibilitychange? true
-))
-                   100)
+                  (js/setTimeout #(keyboards-handler/esc-save! state) 100)
 
                   (when-let [element (gdom/getElement id)]
                     (.focus element)))
                 state)
+   :did-remount (fn [state]
+                  (keyboards-handler/esc-save! state)
+                  state)
    :will-unmount (fn [state]
                    (let [{:keys [id value format block repo dummy? config]} (get-state state)
                          file? (:file? config)]
@@ -674,7 +682,7 @@
                              (page-handler/rename-when-alter-title-property! old-page-name path format content value)
                              (file/alter-file (state/get-current-repo) path (string/trim value)
                                               {:re-render-root? true}))))
-                       (when-not (contains? #{:insert :indent-outdent} (state/get-editor-op))
+                       (when-not (contains? #{:insert :indent-outdent :auto-save} (state/get-editor-op))
                          (editor-handler/save-block! (get-state state) value))))
                    state)}
   [state {:keys [on-hide dummy? node format block block-parent-id]
@@ -696,7 +704,7 @@
        :on-change (fn [e]
                     (let [value (util/evalue e)
                           current-pos (:pos (util/get-caret-pos (gdom/getElement id)))]
-                      (state/set-edit-content! id value)
+                      (state/set-edit-content! id value false)
                       (state/set-edit-pos! current-pos)
                       (when-let [repo (or (:block/repo block)
                                           (state/get-current-repo))]
@@ -717,7 +725,7 @@
                             (reset! *angle-bracket-caret-pos (util/get-caret-pos input))
                             (reset! *show-block-commands true))
                           nil))))
-       :auto-focus true})
+       :auto-focus false})
 
      ;; TODO: how to render the transitions asynchronously?
      (transition-cp

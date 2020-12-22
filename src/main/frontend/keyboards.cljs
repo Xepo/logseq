@@ -3,7 +3,9 @@
             [frontend.handler.history :as history-handler]
             [frontend.handler.ui :as ui-handler]
             [frontend.handler.route :as route-handler]
+            [frontend.handler.search :as search-handler]
             [frontend.state :as state]
+            [frontend.search :as search]
             [frontend.util :as util]
             [medley.core :as medley]
             ["mousetrap" :as mousetrap]
@@ -79,7 +81,12 @@
    "t t" state/toggle-theme!
    "t r" ui-handler/toggle-right-sidebar!
    "t e" state/toggle-new-block-shortcut!
-   "s" route-handler/toggle-between-page-and-file!})
+   "s" route-handler/toggle-between-page-and-file!
+   "ctrl+c ctrl+s" (fn [state e]
+                     (search-handler/rebuild-indices!)
+                     ;; return false to prevent default browser behavior
+                     ;; and stop event from bubbling
+                     false)})
 
 (defonce bind! (gobj/get mousetrap "bind"))
 

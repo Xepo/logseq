@@ -1,6 +1,7 @@
 (ns frontend.components.sidebar
   (:require [rum.core :as rum]
             [frontend.ui :as ui]
+            [frontend.components.theme :as theme]
             [frontend.mixins :as mixins]
             [frontend.db-mixins :as db-mixins]
             [frontend.db :as db]
@@ -38,8 +39,8 @@
     {:viewBox "0 0 24 24", :fill "none", :stroke "currentColor"}
     [:path
      {:d svg-d
-      :stroke-width "2",
-      :stroke-linejoin "round",
+      :stroke-width "2"
+      :stroke-linejoin "round"
       :stroke-linecap "round"}]]
    title])
 
@@ -52,7 +53,7 @@
         right-sidebar? (state/sub :ui/sidebar-open?)
         left-sidebar? (state/sub :ui/left-sidebar-open?)]
     (when left-sidebar?
-      [:nav.flex-1
+      [:nav.flex-1.left-sidebar-inner
        (nav-item "Journals" "/"
                  "M3 12l9-9 9 9M5 10v10a1 1 0 001 1h3a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1h3a1 1 0 001-1V10M9 21h6"
                  (active? :home)
@@ -80,13 +81,14 @@
               "opacity-75 pointer-events-auto"
               "opacity-0 pointer-events-none")
      :on-click close-fn}]
-   [:div#left-bar.fixed.inset-y-0.left-0.flex.flex-col.z-40.max-w-xs.w-full.transform.ease-in-out.duration-300
+   [:div#left-bar.fixed.inset-y-0.left-0.flex.flex-col.z-40.w-full.transform.ease-in-out.duration-300
     {:class (if @open?
               "translate-x-0"
               "-translate-x-full")
-     :style {:background-color "#002b36"}}
+     :style {:background-color "#002b36"
+             :max-width "15rem"}}
     (if @open?
-      [:div.absolute.top-0.right-0.-mr-14.p-1
+      [:div.absolute.top-0.right-0.p-1
        [:button#close-left-bar.flex.items-center.justify-center.h-12.w-12.rounded-full.focus:outline-none.focus:bg-gray-600
         {:on-click close-fn}
         [:svg.h-6.w-6.text-white
@@ -97,7 +99,7 @@
            :stroke-linejoin "round"
            :stroke-linecap "round"}]]]])
     [:div.flex-shrink-0.flex.items-center.px-4.h-16 {:style {:background-color "#002b36"}}
-     (repo/repos-dropdown false)]
+     (repo/repos-dropdown false nil)]
     [:div.flex-1.h-0.overflow-y-auto
      (sidebar-nav route-match close-fn)]]])
 
@@ -105,20 +107,19 @@
   [{:keys [route-match global-graph-pages? logged? home? route-name indexeddb-support? white? db-restoring? main-content]}]
   (rum/with-context [[t] i18n/*tongue-context*]
     [:div#main-content.cp__sidebar-main-layout
-     (when-not config/mobile?
-       [:div#sidebar-nav-wrapper.flex-col.pt-4.hidden.sm:block
-        {:style {:flex (if (state/get-left-sidebar-open?)
-                         "0 1 20%"
-                         "0 0 0px")
-                 :border-right (str "1px solid "
-                                    (if white? "#f0f8ff" "#073642"))}}
-        (when (state/sub :ui/left-sidebar-open?)
-          (sidebar-nav route-match nil))])
+     [:div#sidebar-nav-wrapper.flex-col.pt-4.hidden.sm:block
+      {:style {:flex (if (state/get-left-sidebar-open?)
+                       "0 1 20%"
+                       "0 0 0px")
+               :border-right (str "1px solid "
+                                  (if white? "#f0f8ff" "#073642"))}}
+      (when (state/sub :ui/left-sidebar-open?)
+        (sidebar-nav route-match nil))]
      [:div#main-content-container.cp__sidebar-main-content-container
       [:div.cp__sidebar-main-content
        {:data-is-global-graph-pages global-graph-pages?
         :data-is-full-width (or global-graph-pages?
-                                (contains? #{:all-files :all-pages} route-name))}
+                                (contains? #{:all-files :all-pages :my-publishing} route-name))}
        (cond
          (not indexeddb-support?)
          nil
@@ -131,8 +132,7 @@
          :else
          [:div {:style {:margin-bottom (if global-graph-pages? 0 120)}}
           main-content])]]
-     (when-not config/mobile?
-       (right-sidebar/sidebar))]))
+     (right-sidebar/sidebar)]))
 
 (defn get-default-home-if-valid
   []
@@ -236,9 +236,8 @@
   (when-not (state/sub :ui/sidebar-open?)
     ;; TODO: remove with-context usage
     (rum/with-context [[t] i18n/*tongue-context*]
-      [:div#help.font-bold.absolute.bottom-4.bg-base-2.rounded-full.h-8.w-8.flex.items-center.justify-center.font-bold.cursor.opacity-70.hover:opacity-100
-       {:style {:right 24}
-        :title (t :help-shortcut-title)
+      [:div.cp__sidebar-help-btn
+       {:title (t :help-shortcut-title)
         :on-click (fn []
                     (state/sidebar-add-block! (state/get-current-repo) "help" :help nil))}
        "?"])))
@@ -300,6 +299,7 @@
         current-repo (state/sub :git/current-repo)
         theme (state/sub :ui/theme)
         white? (= "white" (state/sub :ui/theme))
+        sidebar-open? (state/sub :ui/sidebar-open?)
         route-name (get-in route-match [:data :name])
         global-graph-pages? (= :graph route-name)
         logged? (:name me)
@@ -309,44 +309,49 @@
         home? (= :home route-name)
         default-home (get-default-home-if-valid)]
     (rum/with-context [[t] i18n/*tongue-context*]
-      [:div {:class (if white? "white-theme" "dark-theme")
-             :on-click editor-handler/unhighlight-block!}
-       (sidebar-mobile-sidebar {:open? open?
-                                :close-fn close-fn
-                                :route-match route-match})
+      (theme/container
+       {:theme theme
+        :on-click editor-handler/unhighlight-block!}
 
-       [:div.cp__sidebar-layout.h-screen
-        (header/header {:open-fn open-fn
-                        :white? white?
-                        :current-repo current-repo
-                        :logged? logged?
-                        :page? page?
-                        :route-match route-match
-                        :me me
-                        :default-home default-home
-                        :new-block-mode new-block-mode})
+       [:div.theme-inner
+        (sidebar-mobile-sidebar
+         {:open?       open?
+          :close-fn    close-fn
+          :route-match route-match})
+        [:div.#app-container.cp__sidebar-layout
+         {:class (if sidebar-open? "is-right-sidebar-open")}
+         (header/header {:open-fn        open-fn
+                         :white?         white?
+                         :current-repo   current-repo
+                         :logged?        logged?
+                         :page?          page?
+                         :route-match    route-match
+                         :me             me
+                         :default-home   default-home
+                         :new-block-mode new-block-mode})
 
-        (sidebar-main {:route-match route-match
-                       :global-graph-pages? global-graph-pages?
-                       :logged? logged?
-                       :home? home?
-                       :route-name route-name
-                       :indexeddb-support? indexeddb-support?
-                       :white? white?
-                       :db-restoring? db-restoring?
-                       :main-content main-content})]
+         (sidebar-main {:route-match         route-match
+                        :global-graph-pages? global-graph-pages?
+                        :logged?             logged?
+                        :home?               home?
+                        :route-name          route-name
+                        :indexeddb-support?  indexeddb-support?
+                        :white?              white?
+                        :db-restoring?       db-restoring?
+                        :main-content        main-content})]
 
-       (ui/notification)
-       (ui/modal)
-       (custom-context-menu)
-       [:a#download.hidden]
-       (when (and (not config/mobile?)
-                  (not config/publishing?))
-         (help-button)
+        (ui/notification)
+        (ui/modal)
+        (custom-context-menu)
+        [:a#download.hidden]
+        (when
+         (and (not config/mobile?)
+              (not config/publishing?))
+          (help-button)
          ;; [:div.font-bold.absolute.bottom-4.bg-base-2.rounded-full.h-8.w-8.flex.items-center.justify-center.font-bold.cursor.opacity-70.hover:opacity-100
          ;;  {:style {:left 24}
          ;;   :title "Click to show/hide sidebar"
          ;;   :on-click (fn []
          ;;               (state/set-left-sidebar-open! (not (state/get-left-sidebar-open?))))}
          ;;  (if (state/sub :ui/left-sidebar-open?) "<" ">")]
-)])))
+)]))))

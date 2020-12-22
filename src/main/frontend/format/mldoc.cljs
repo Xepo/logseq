@@ -3,7 +3,14 @@
             [frontend.util :as util]
             [clojure.string :as string]
             [cljs-bean.core :as bean]
-            [cljs.core.match :refer-macros [match]]))
+            [cljs.core.match :refer-macros [match]]
+            [lambdaisland.glogi :as log]
+            [goog.object :as gobj]
+            ["mldoc" :as mldoc :refer [Mldoc]]))
+
+(defonce parseJson (gobj/get Mldoc "parseJson"))
+(defonce parseInlineJson (gobj/get Mldoc "parseInlineJson"))
+(defonce parseHtml (gobj/get Mldoc "parseHtml"))
 
 (defn default-config
   [format]
@@ -15,18 +22,13 @@
               :keep_line_break true}
              :format format)))))
 
-(defn loaded? []
-  js/window.Mldoc)
-
 (defn parse-json
   [content config]
-  (when (loaded?)
-    (.parseJson js/window.Mldoc content (or config default-config))))
+  (parseJson content (or config default-config)))
 
 (defn inline-parse-json
   [text config]
-  (when (loaded?)
-    (.parseInlineJson js/window.Mldoc text (or config default-config))))
+  (parseInlineJson text (or config default-config)))
 
 ;; E.g "Foo Bar \"Bar Baz\""
 (defn- sep-by-quote-or-space-or-comma
@@ -48,6 +50,14 @@
        (remove string/blank?)
        (map string/lower-case)
        (map string/trim)))))
+
+(defn- remove-page-ref-brackets
+  [s]
+  (if (and (string? s)
+           (string/starts-with? s "[[")
+           (string/ends-with? s "]]"))
+    (subs s 2 (- (count s) 2))
+    s))
 
 ;; Org-roam
 (defn get-tags-from-definition
@@ -115,7 +125,11 @@
                          (:roam_key properties)
                          (assoc :key (:roam_key properties))
                          (:alias properties)
-                         (update :alias sep-by-quote-or-space-or-comma)
+                         (update :alias
+                                 (fn [s]
+                                   (->> s
+                                        (sep-by-quote-or-space-or-comma)
+                                        (map remove-page-ref-brackets))))
                          (:tags properties)
                          (update :tags sep-by-quote-or-space-or-comma)
                          (:roam_tags properties)
@@ -145,7 +159,8 @@
           (parse-json config)
           (util/json->clj)
           (collect-page-properties)))
-    (catch js/Error _e
+    (catch js/Error e
+      (log/error :edn/convert-failed e)
       [])))
 
 (defn inline->edn
@@ -164,12 +179,24 @@
   (toEdn [this content config]
     (->edn content config))
   (toHtml [this content config]
-    (.parseHtml js/window.Mldoc content config))
+    (parseHtml content config))
   (loaded? [this]
-    (some? (loaded?)))
+    true)
   (lazyLoad [this ok-handler]
     true))
 
 (defn plain->text
   [plains]
   (string/join (map last plains)))
+
+(defn parse-properties
+  [content format]
+  (let [ast (->> (->edn content
+                        (default-config format))
+                 (map first))
+        properties (let [properties (and (seq ast)
+                                         (= "Properties" (ffirst ast))
+                                         (last (first ast)))]
+                     (if (and properties (seq properties))
+                       properties))]
+    (into {} properties)))

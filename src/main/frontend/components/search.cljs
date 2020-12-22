@@ -52,7 +52,9 @@
   [{:keys [pages files blocks]} search-q]
   (rum/with-context [[t] i18n/*tongue-context*]
     (let [new-page [{:type :new-page}]
-          new-file [{:type :new-file}]
+          new-file (when-let [ext (util/get-file-ext search-q)]
+                     (when (contains? config/mldoc-support-formats (keyword (string/lower-case ext)))
+                       [{:type :new-file}]))
           pages (map (fn [page] {:type :page :data page}) pages)
           files (map (fn [file] {:type :file :data file}) files)
           blocks (map (fn [block] {:type :block :data block}) blocks)
@@ -85,7 +87,8 @@
                                           :path-params {:path data}})
 
                         :block
-                        (let [page (:page/name (:block/page data))
+                        (let [block-uuid (uuid (:block/uuid data))
+                              page (:page/name (:block/page (db/entity [:block/uuid block-uuid])))
                               path (str "/page/" (util/encode-str page) "#ls-block-" (:block/uuid data))]
                           (route/redirect-with-fragment! path))
                         nil))
@@ -100,7 +103,8 @@
                                  {:page page}))
 
                               :block
-                              (let [block (db/entity [:block/uuid (:block/uuid data)])]
+                              (let [block-uuid (uuid (:block/uuid data))
+                                    block (db/entity [:block/uuid block-uuid])]
                                 (state/sidebar-add-block!
                                  (state/get-current-repo)
                                  (:db/id block)

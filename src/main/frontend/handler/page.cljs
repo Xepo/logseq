@@ -21,8 +21,10 @@
             [frontend.git :as git]
             [frontend.fs :as fs]
             [promesa.core :as p]
-            [goog.object :as gobj]
-            [frontend.format.mldoc :as mldoc]))
+            [lambdaisland.glogi :as log]
+            [frontend.format.mldoc :as mldoc]
+            [cljs-time.core :as t]
+            [cljs-time.coerce :as tc]))
 
 (defn- get-directory
   [journal?]
@@ -63,9 +65,9 @@
                 :error)
                ;; create the file
                (let [content (util/default-content-with-title format title)]
-                 (p/let [_ (fs/create-if-not-exists dir file-path content)]
-                   (db/reset-file! repo path content)
-                   (git-handler/git-add repo path)
+                 (p/let [_ (fs/create-if-not-exists repo dir file-path content)
+                         _ (git-handler/git-add repo path)]
+                   (file-handler/reset-file! repo path content)
                    (when redirect?
                      (route-handler/redirect! {:to :page
                                                :path-params {:name page}})
@@ -292,22 +294,23 @@
   (let [repo (state/get-current-repo)
         old-path (:file/path file)
         new-path (compute-new-file-path old-path new-name)]
+    ;; update db
+    (db/transact! repo [{:db/id (:db/id file)
+                         :file/path new-path}])
+
+    ;; update files db
+    (let [conn (db/get-files-conn repo)]
+      (when-let [file (d/entity (d/db conn) [:file/path old-path])]
+        (d/transact! conn [{:db/id (:db/id file)
+                            :file/path new-path}])))
     (->
-     (p/let [_ (fs/rename (str (util/get-repo-dir repo) "/" old-path)
-                          (str (util/get-repo-dir repo) "/" new-path))]
-       ;; update db
-       (db/transact! repo [{:db/id (:db/id file)
-                            :file/path new-path}])
-
-       ;; update files db
-       (let [conn (db/get-files-conn repo)]
-         (when-let [file (d/entity (d/db conn) [:file/path old-path])]
-           (d/transact! conn [{:db/id (:db/id file)
-                               :file/path new-path}])))
-
-       (p/let [_ (git/rename repo old-path new-path)]
-         (common-handler/check-changed-files-status)
-         (ok-handler)))
+     (p/let [_ (fs/rename repo
+                          (str (util/get-repo-dir repo) "/" old-path)
+                          (str (util/get-repo-dir repo) "/" new-path))
+             _ (when-not (config/local-db? repo)
+                 (git/rename repo old-path new-path))]
+       (common-handler/check-changed-files-status)
+       (ok-handler))
      (p/catch (fn [error]
                 (println "file rename failed: " error))))))
 
@@ -373,13 +376,17 @@
         last-empty? (>= 3 (count (:block/content last-block)))
         heading-pattern (config/get-block-pattern (state/get-preferred-format))
         pre-str (str heading-pattern heading-pattern)
-        new-content (if last-empty? (str pre-str " [[" page-name "]]") (str (:block/content last-block) pre-str " [[" page-name "]]"))]
+        new-content (if last-empty?
+                      (str pre-str " [[" page-name "]]")
+                      (str (string/trimr (:block/content last-block))
+                           "\n"
+                           pre-str " [[" page-name "]]"))]
     (editor-handler/insert-new-block-aux!
      last-block
      new-content
      {:create-new-block? false
       :ok-handler
-      (fn [[_first-block last-block _new-block-content]]
+      (fn [_]
         (notification/show! "Added to contents!" :success)
         (editor-handler/clear-when-saved!))
       :with-level? true
@@ -423,3 +430,67 @@
 (defn init-commands!
   []
   (commands/init-commands! get-page-ref-text))
+
+(defn delete-page-from-logseq
+  [project permalink]
+  (let [url (util/format "%s%s/%s" config/api project permalink)]
+    (js/Promise.
+     (fn [resolve reject]
+       (util/delete url
+                    (fn [result]
+                      (resolve result))
+                    (fn [error]
+                      (log/error :page/http-delete-failed error)
+                      (reject error)))))))
+
+(defn get-page-list-by-project-name
+  [project]
+  (js/Promise.
+   (fn [resolve _]
+     (if-not (string? project)
+       (resolve :project-name-is-invalid)
+       (let [url (util/format "%sprojects/%s/pages" config/api project)]
+         (util/fetch url
+                     (fn [result]
+                       (log/debug :page/get-page-list result)
+                       (let [data (:result result)]
+                         (if (sequential? data)
+                           (do (state/set-published-pages data)
+                               (resolve data))
+                           (log/error :page/http-get-list-result-malformed result))))
+                     (fn [error]
+                       (log/error :page/http-get-list-failed error)
+                       (resolve error))))))))
+
+(defn update-state-and-notify
+  [page-name]
+  (page-add-properties! page-name {:published false})
+  (notification/show! (util/format "Remove Page \"%s\" from Logseq server success" page-name) :success))
+
+(defn add-page-to-recent!
+  [repo page]
+  (let [pages (or (db/get-key-value repo :recent/pages)
+                  '())
+        new-pages (take 12 (distinct (cons page pages)))]
+    (db/set-key-value repo :recent/pages new-pages)))
+
+(defn template-exists?
+  [title]
+  (when title
+    (let [templates (keys (db/get-all-templates))]
+      (when (seq templates)
+        (let [templates (map string/lower-case templates)]
+          (contains? (set templates) (string/lower-case title)))))))
+
+(defn get-pages-with-modified-at
+  [repo]
+  (let [now-long (tc/to-long (t/now))]
+    (->> (db/get-modified-pages repo)
+         (seq)
+         (sort-by (fn [[page modified-at]]
+                    [modified-at page]))
+         (reverse)
+         (remove (fn [[page modified-at]]
+                   (or (util/file-page? page)
+                       (and modified-at
+                            (> modified-at now-long))))))))

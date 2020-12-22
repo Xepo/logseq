@@ -18,7 +18,8 @@
             [frontend.components.page :as page]
             [frontend.components.onboarding :as onboarding]
             [goog.object :as gobj]
-            [clojure.string :as string]))
+            [clojure.string :as string]
+            [frontend.handler.block :as block-handler]))
 
 (rum/defc blocks-inner < rum/static
   {:did-mount (fn [state]
@@ -56,7 +57,7 @@
   (let [raw-blocks (db/get-page-blocks repo page)
         document-mode? (state/sub :document/mode?)
         blocks (->>
-                (db/with-dummy-block raw-blocks format nil {:journal? true})
+                (block-handler/with-dummy-block raw-blocks format nil {:journal? true})
                 (db/with-block-refs-count repo))]
     (blocks-inner blocks page document-mode?)))
 
@@ -77,7 +78,7 @@
       [:a.initial-color.title
        {:href (str "/page/" encoded-page-name)
         :on-click (fn [e]
-                    (util/stop e)
+                    (.preventDefault e)
                     (when (gobj/get e "shiftKey")
                       (when-let [page (db/pull [:page/name (string/lower-case title)])]
                         (state/sidebar-add-block!
@@ -106,7 +107,7 @@
   [:div#journals
    (ui/infinite-list
     (for [[journal-name format] latest-journals]
-      [:div.journal.content {:key journal-name}
+      [:div.journal-item.content {:key journal-name}
        (journal-cp [journal-name format])])
     {:on-load (fn []
                 (page-handler/load-more-journals!))})])

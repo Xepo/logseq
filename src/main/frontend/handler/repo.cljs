@@ -6,17 +6,20 @@
             [lambdaisland.glogi :as log]
             [frontend.state :as state]
             [frontend.db :as db]
+            [frontend.idb :as idb]
             [frontend.git :as git]
             [cljs-bean.core :as bean]
             [frontend.date :as date]
             [frontend.config :as config]
             [frontend.format :as format]
+            [frontend.search :as search]
             [frontend.handler.ui :as ui-handler]
             [frontend.handler.git :as git-handler]
             [frontend.handler.file :as file-handler]
             [frontend.handler.notification :as notification]
             [frontend.handler.route :as route-handler]
             [frontend.handler.common :as common-handler]
+            [frontend.handler.extract :as extract-handler]
             [frontend.ui :as ui]
             [cljs.reader :as reader]
             [clojure.string :as string]
@@ -52,12 +55,12 @@
         dir (str repo-dir "/" app-dir)]
     (p/let [_ (fs/mkdir-if-not-exists dir)]
       (let [default-content config/config-default-content]
-        (p/let [file-exists? (fs/create-if-not-exists repo-dir (str app-dir "/" config/config-file) default-content)]
+        (p/let [file-exists? (fs/create-if-not-exists repo-url repo-dir (str app-dir "/" config/config-file) default-content)]
           (let [path (str app-dir "/" config/config-file)
                 old-content (when file-exists?
                               (db/get-file repo-url path))
                 content (or old-content default-content)]
-            (db/reset-file! repo-url path content)
+            (file-handler/reset-file! repo-url path content)
             (db/reset-config! repo-url content)
             (when-not (= content old-content)
               (git-handler/git-add repo-url path))))))))
@@ -73,9 +76,9 @@
         file-path (str "/" path)
         default-content (util/default-content-with-title format "contents")]
     (p/let [_ (fs/mkdir-if-not-exists (str repo-dir "/" (state/get-pages-directory)))
-            file-exists? (fs/create-if-not-exists repo-dir file-path default-content)]
+            file-exists? (fs/create-if-not-exists repo-url repo-dir file-path default-content)]
       (when-not file-exists?
-        (db/reset-file! repo-url path default-content)
+        (file-handler/reset-file! repo-url path default-content)
         (git-handler/git-add repo-url path)))))
 
 (defn create-custom-theme
@@ -86,9 +89,9 @@
         file-path (str "/" path)
         default-content ""]
     (p/let [_ (fs/mkdir-if-not-exists (str repo-dir "/" config/app-name))
-            file-exists? (fs/create-if-not-exists repo-dir file-path default-content)]
+            file-exists? (fs/create-if-not-exists repo-url repo-dir file-path default-content)]
       (when-not file-exists?
-        (db/reset-file! repo-url path default-content)
+        (file-handler/reset-file! repo-url path default-content)
         (git-handler/git-add repo-url path)))))
 
 (defn create-dummy-notes-page
@@ -98,16 +101,14 @@
         path (str (config/get-pages-directory) "/how_to_make_dummy_notes.md")
         file-path (str "/" path)]
     (p/let [_ (fs/mkdir-if-not-exists (str repo-dir "/" (config/get-pages-directory)))
-            _file-exists? (fs/create-if-not-exists repo-dir file-path content)]
-      (db/reset-file! repo-url path content))))
+            _file-exists? (fs/create-if-not-exists repo-url repo-dir file-path content)]
+      (file-handler/reset-file! repo-url path content))))
 
 (defn create-today-journal-if-not-exists
   ([repo-url]
    (create-today-journal-if-not-exists repo-url nil))
   ([repo-url content]
    (spec/validate :repos/url repo-url)
-   (when (config/local-db? repo-url)
-     (fs/check-directory-permission! repo-url))
    (let [repo-dir (util/get-repo-dir repo-url)
          format (state/get-preferred-format repo-url)
          title (date/today)
@@ -133,12 +134,25 @@
          empty-blocks? (empty? (db/get-page-blocks-no-cache repo-url (string/lower-case title)))]
      (when (or empty-blocks?
                (not page-exists?))
-       (p/let [_ (fs/mkdir-if-not-exists (str repo-dir "/" config/default-journals-directory))
-               file-exists? (fs/create-if-not-exists repo-dir file-path content)]
+       (p/let [_ (fs/check-directory-permission! repo-url)
+               _ (fs/mkdir-if-not-exists (str repo-dir "/" config/default-journals-directory))
+               file-exists? (fs/create-if-not-exists repo-url repo-dir file-path content)]
          (when-not file-exists?
-           (db/reset-file! repo-url path content)
+           (file-handler/reset-file! repo-url path content)
            (ui-handler/re-render-root!)
            (git-handler/git-add repo-url path)))))))
+
+(defn create-today-journal!
+  []
+  (state/set-today! (date/today))
+  (when-let [repo (state/get-current-repo)]
+    (when (or (db/cloned? repo)
+              (and (config/local-db? repo)
+                   ;; config file exists
+                   (db/get-file (str config/app-name "/" config/config-file))))
+      (let [today-page (string/lower-case (date/today))]
+        (when (empty? (db/get-page-blocks-no-cache repo today-page))
+          (create-today-journal-if-not-exists repo))))))
 
 (defn create-default-files!
   [repo-url]
@@ -148,8 +162,17 @@
   (create-contents-file repo-url)
   (create-custom-theme repo-url))
 
-(defn- parse-files-and-load-to-db!
-  [repo-url files {:keys [first-clone? delete-files delete-blocks re-render? re-render-opts] :as opts}]
+(defn- reset-contents-and-blocks!
+  [repo-url files blocks-pages delete-files delete-blocks]
+  (db/transact-files-db! repo-url files)
+  (let [files (map #(select-keys % [:file/path]) files)
+        all-data (-> (concat delete-files delete-blocks files blocks-pages)
+                     (util/remove-nils))]
+    (db/transact! repo-url all-data)))
+
+(defn parse-files-and-load-to-db!
+  [repo-url files {:keys [first-clone? delete-files delete-blocks re-render? re-render-opts] :as opts
+                   :or {re-render? true}}]
   (state/set-loading-files! false)
   (state/set-importing-to-db! true)
   (let [file-paths (map :file/path files)
@@ -159,9 +182,9 @@
                           (contains? config/mldoc-support-formats format)))
                       files)
         blocks-pages (if (seq parsed-files)
-                       (db/extract-all-blocks-pages repo-url parsed-files)
+                       (extract-handler/extract-all-blocks-pages repo-url parsed-files)
                        [])]
-    (db/reset-contents-and-blocks! repo-url files blocks-pages delete-files delete-blocks)
+    (reset-contents-and-blocks! repo-url files blocks-pages delete-files delete-blocks)
     (let [config-file (str config/app-name "/" config/config-file)]
       (if (contains? (set file-paths) config-file)
         (when-let [content (some #(when (= (:file/path %) config-file)
@@ -173,7 +196,8 @@
     (state/set-importing-to-db! false)))
 
 (defn load-repo-to-db!
-  [repo-url {:keys [first-clone? diffs nfs-files]}]
+  [repo-url {:keys [first-clone? diffs nfs-files]
+             :as opts}]
   (spec/validate :repos/url repo-url)
   (let [load-contents (fn [files option]
                         (file-handler/load-files-contents!
@@ -182,10 +206,10 @@
                          (fn [files-contents]
                            (parse-files-and-load-to-db! repo-url files-contents option))))]
     (cond
-      (and (not (seq diffs)) (seq nfs-files))
+      (and (not (seq diffs)) nfs-files)
       (parse-files-and-load-to-db! repo-url nfs-files {:first-clone? true})
 
-      first-clone?
+      (and first-clone? (not nfs-files))
       (->
        (p/let [files (file-handler/load-files repo-url)]
          (load-contents files {:first-clone? first-clone?}))
@@ -228,6 +252,56 @@
     (load-repo-to-db! repo-url {:first-clone? first-clone?
                                 :diffs diffs})))
 
+(defn rebuild-page-blocks-children
+  "For performance reason, we can update the :block/children value after every operation,
+  but it's hard to make sure that it's correct, also it needs more time to implement it.
+  We can improve it if the performance is really an issue."
+  [repo page]
+  (let [blocks (->>
+                (db/get-page-blocks-no-cache repo page {:pull-keys '[:db/id :block/uuid :block/level :block/pre-block? :block/meta]})
+                (remove :block/pre-block?)
+                (map #(select-keys % [:db/id :block/uuid :block/level]))
+                (reverse))
+        original-blocks blocks]
+    (loop [blocks blocks
+           tx []
+           children {}
+           last-level 10000]
+      (if (seq blocks)
+        (let [[{:block/keys [uuid level] :as block} & others] blocks
+              [tx children] (cond
+                              (< level last-level)        ; parent
+                              (let [cur-children (get children last-level)
+                                    tx (if (seq cur-children)
+                                         (vec
+                                          (concat
+                                           tx
+                                           (map
+                                            (fn [child]
+                                              [:db/add (:db/id block) :block/children [:block/uuid child]])
+                                            cur-children)))
+                                         tx)
+                                    children (-> children
+                                                 (dissoc last-level)
+                                                 (update level conj uuid))]
+                                [tx children])
+
+                              (> level last-level)        ; child of sibling
+                              (let [children (update children level conj uuid)]
+                                [tx children])
+
+                              :else                       ; sibling
+                              (let [children (update children last-level conj uuid)]
+                                [tx children]))]
+          (recur others tx children level))
+        ;; TODO: add top-level children to the "Page" block (we might remove the Page from db schema)
+        (when (seq tx)
+          (let [delete-tx (map (fn [block]
+                                 [:db/retract (:db/id block) :block/children])
+                               original-blocks)]
+            (->> (concat delete-tx tx)
+                 (remove nil?))))))))
+
 (defn transact-react-and-alter-file!
   [repo tx transact-option files]
   (spec/validate :repos/url repo)
@@ -239,11 +313,11 @@
      tx
      transact-option)
     (when (seq pages)
-      (let [children-tx (mapcat #(db/rebuild-page-blocks-children repo %) pages)]
+      (let [children-tx (mapcat #(rebuild-page-blocks-children repo %) pages)]
         (when (seq children-tx)
           (db/transact! repo children-tx))))
     (when (seq files)
-      (file-handler/alter-files repo files))))
+      (file-handler/alter-files repo files {}))))
 
 (declare push)
 
@@ -353,7 +427,7 @@
          (state/input-idle? repo-url)
          (or (not= status :pushing)
              custom-commit?))
-      (-> (p/let [files (js/window.workerThread.getChangedFiles (util/get-repo-dir (state/get-current-repo)))]
+      (-> (p/let [files (git/add-all (state/get-current-repo))]
             (when (or (seq files) merge-push-no-diff?)
               ;; auto commit if there are any un-committed changes
               (let [commit-message (if (string/blank? commit-message)
@@ -451,10 +525,8 @@
                       (fs/rmdir (util/get-repo-dir url))
                       (state/delete-repo! repo))]
     (if (config/local-db? url)
-      (do
-        (delete-db-f)
-        ;; clear handles
-)
+      (p/let [_ (idb/clear-local-db! url)] ; clear file handles
+        (delete-db-f))
       (util/delete (str config/api "repos/" id)
                    delete-db-f
                    (fn [error]
@@ -550,19 +622,24 @@
                    500)))
 
 (defn rebuild-index!
-  [{:keys [id url] :as repo}]
-  (spec/validate :repos/repo repo)
-  (db/remove-conn! url)
-  (db/clear-query-state!)
-  (-> (p/do! (db/remove-db! url)
-             (db/remove-files-db! url)
-             (fs/rmdir (util/get-repo-dir url))
-             (clone-and-load-db url))
-      (p/catch (fn [error]
-                 (prn "Delete repo failed, error: " error)))))
+  [url]
+  (when url
+    (search/reset-indice! url)
+    (db/remove-conn! url)
+    (db/clear-query-state!)
+    (-> (p/do! (db/remove-db! url)
+               (db/remove-files-db! url)
+               (fs/rmdir (util/get-repo-dir url))
+               (clone-and-load-db url))
+        (p/catch (fn [error]
+                   (prn "Delete repo failed, error: " error))))))
 
 (defn git-commit-and-push!
   [commit-message]
   (when-let [repo (state/get-current-repo)]
     (push repo {:commit-message commit-message
                 :custom-commit? true})))
+
+(defn get-repo-name
+  [url]
+  (last (string/split url #"/")))

@@ -47,11 +47,12 @@
 ;; excalidraw
 (defn create-draws-directory!
   [repo]
-  (let [repo-dir (util/get-repo-dir repo)]
-    (util/p-handle
-     (fs/mkdir (str repo-dir (str "/" config/default-draw-directory)))
-     (fn [_result] nil)
-     (fn [_error] nil))))
+  (when repo
+    (let [repo-dir (util/get-repo-dir repo)]
+     (util/p-handle
+      (fs/mkdir (str repo-dir (str "/" config/default-draw-directory)))
+      (fn [_result] nil)
+      (fn [_error] nil)))))
 
 (defn save-excalidraw!
   [file data ok-handler]
@@ -59,25 +60,23 @@
         repo (state/get-current-repo)]
     (when repo
       (let [repo-dir (util/get-repo-dir repo)]
-        (p/let [_ (create-draws-directory! repo)]
-          (util/p-handle
-           (fs/write-file repo-dir path data)
-           (fn [_]
-             (util/p-handle
-              (git-handler/git-add repo path)
-              (fn [_]
-                (ok-handler file)
-                (let [modified-at (tc/to-long (t/now))]
-                  (db/transact! repo
-                                [{:file/path path
-                                  :file/last-modified-at modified-at}
-                                 {:page/name file
-                                  :page/file path
-                                  :page/last-modified-at (tc/to-long (t/now))
-                                  :page/journal? false}])))))
-           (fn [error]
-             (prn "Write file failed, path: " path ", data: " data)
-             (js/console.dir error))))))))
+        (->
+         (p/do!
+          (create-draws-directory! repo)
+          (fs/write-file repo repo-dir path data)
+          (git-handler/git-add repo path)
+          (ok-handler file)
+          (let [modified-at (tc/to-long (t/now))]
+            (db/transact! repo
+                          [{:file/path path
+                            :file/last-modified-at modified-at}
+                           {:page/name file
+                            :page/file path
+                            :page/last-modified-at (tc/to-long (t/now))
+                            :page/journal? false}])))
+         (p/catch (fn [error]
+                    (prn "Write file failed, path: " path ", data: " data)
+                    (js/console.dir error))))))))
 
 (defn get-all-excalidraw-files
   [ok-handler]
